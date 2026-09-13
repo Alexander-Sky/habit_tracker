@@ -1,0 +1,28 @@
+Name                                                  Stmts   Miss  Cover   Missing
+-----------------------------------------------------------------------------------
+config/__init__.py                                        2      0   100%
+config/celery.py                                          6      0   100%
+config/urls.py                                            8      0   100%
+habits/admin.py                                           8      0   100%
+habits/apps.py                                            4      0   100%
+habits/models.py                                         24      0   100%
+habits/paginators.py                                      6      0   100%
+habits/permissions.py                                     5      0   100%
+habits/serializers.py                                    24      0   100%
+habits/urls.py                                            7      0   100%
+habits/validators.py                                     62      8    87%   42, 55, 61, 80, 106, 122, 127, 133
+habits/views.py                                          25      0   100%
+notifications/apps.py                                     4      0   100%
+notifications/management/commands/fetch_chat_ids.py      36      0   100%
+notifications/services.py                                34      0   100%
+notifications/tasks.py                                   41      1    98%   66
+users/admin.py                                            8      0   100%
+users/apps.py                                             4      0   100%
+users/models.py                                          34      0   100%
+users/serializers.py                                     34      0   100%
+users/urls.py                                             9      0   100%
+users/views.py                                           16      0   100%
+-----------------------------------------------------------------------------------
+TOTAL                                                   401      9    98%
+
+8 empty files skipped.
