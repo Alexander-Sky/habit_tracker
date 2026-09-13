@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# Виртуальные окружения
+venv/
+env/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+
+# Базы данных
+*.sqlite3
+*.sqlite
+db.sqlite3
+
+# Секреты
+.env
+.env.local
+.env.*.local
+
+# Медиа и статика
+media/
+staticfiles/
+
+# Логи и отчёты
+*.log
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Celery
+celerybeat-schedule
+celerybeat-schedule.*
+celerybeat.pid
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+desktop.ini
