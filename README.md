@@ -6,32 +6,57 @@
 
 ## Стек
 
-- Python 3.12+
-- Django 5.2
-- Django REST Framework
+- Python 3.12+ (в образе и в CI — 3.14)
+- Django 6.1 + Django REST Framework
 - djangorestframework-simplejwt — JWT-авторизация
 - drf-spectacular — OpenAPI-документация
 - django-cors-headers — доступ для фронтенда
 - Celery + Redis — фоновые и периодические задачи
 - requests — обращения к Telegram Bot API
-- SQLite (переключается на PostgreSQL одной переменной)
+- PostgreSQL — база данных
+- Gunicorn + Nginx — на сервере
+- Docker и Docker Compose — запуск всего проекта
+- GitHub Actions — линт, тесты, сборка образа и деплой
 
-## Установка
+## Запуск через Docker
+
+Нужен только установленный [Docker](https://docs.docker.com/get-docker/) — ни Python, ни PostgreSQL, ни Redis на компьютер ставить не нужно.
 
 ```bash
-poetry install --no-root
 cp .env.template .env
+docker compose up -d --build
 ```
 
-Заполните `.env` — минимум `SECRET_KEY` и `TELEGRAM_BOT_TOKEN`. Файл `.env` в репозиторий не попадает.
+Всё. Одна команда поднимает пять контейнеров, применяет миграции и собирает статику. API открывается на http://127.0.0.1:8000/api/docs/
+
+В `.env` достаточно поменять `SECRET_KEY`, остальное уже заполнено для локального запуска. Телеграм-напоминания заработают, когда добавите `TELEGRAM_BOT_TOKEN`. Файл `.env` в репозиторий не попадает.
+
+### Что поднимается
+
+| Сервис | Образ | Зачем | Порт наружу |
+|---|---|---|---|
+| `web` | сборка из `Dockerfile` | Django | 8000 |
+| `db` | `postgres:17-alpine` | База данных | нет |
+| `redis` | `redis:8-alpine` | Брокер для Celery | нет |
+| `celery` | сборка из `Dockerfile` | Воркер: отправляет напоминания | нет |
+| `celery-beat` | сборка из `Dockerfile` | Расписание: будит воркер раз в минуту | нет |
+
+Наружу проброшен только порт Django. База и Redis объявлены через `expose`: они видны другим контейнерам по имени сервиса (`db`, `redis`), но с хоста к ним не подключиться.
+
+`web` не стартует, пока `db` и `redis` не ответят на healthcheck, — иначе Django падал бы на `migrate`, не дождавшись базы.
+
+Данные PostgreSQL и Redis лежат в именованных томах и переживают `docker compose down`. Стереть их вместе с контейнерами: `docker compose down -v`.
+
+### Полезные команды
 
 ```bash
-poetry run python manage.py migrate
-poetry run python manage.py createsuperuser
-poetry run python manage.py runserver
+docker compose ps                  # что запущено
+docker compose logs -f web         # логи Django
+docker compose logs -f celery      # логи воркера
+docker compose exec web python manage.py createsuperuser
+docker compose exec web python manage.py test
+docker compose down                # остановить
 ```
-
-Сервер поднимется на http://127.0.0.1:8000/
 
 ### Переменные окружения
 
@@ -44,11 +69,13 @@ poetry run python manage.py runserver
 | `ALLOWED_HOSTS` | Домены через запятую |
 | `TIME_ZONE` | Таймзона проекта и Celery, они связаны |
 | `CORS_ALLOWED_ORIGINS` | Домены фронтенда через запятую |
+| `DB_NAME`, `DB_USER`, `DB_PASSWORD` | Их читает и Django, и контейнер с PostgreSQL |
+| `DB_HOST` | `db` для Docker, `localhost` без него |
 | `CELERY_BROKER_URL` | Адрес Redis |
 | `TELEGRAM_BOT_TOKEN` | Токен от @BotFather |
 | `TELEGRAM_TIMEOUT_SECONDS` | Сколько ждать ответа от Telegram |
 | `REMINDER_WINDOW_MINUTES` | Запас времени на отправку напоминания |
-| `DB_ENGINE`, `DB_NAME`, … | PostgreSQL вместо SQLite |
+| `WEB_IMAGE` | Тег образа для сервера, его пишет GitHub Actions |
 
 ## Документация
 
@@ -204,7 +231,9 @@ poetry run python manage.py fetch_chat_ids --email user@example.com
 
 ### Запуск
 
-Три процесса в трёх окнах, Redis должен работать.
+Через Docker запускать нечего: `web`, `celery` и `celery-beat` поднимаются вместе с остальными контейнерами по `docker compose up`.
+
+Без Docker нужны три процесса в трёх окнах и работающий Redis:
 
 ```bash
 # 1. Django
@@ -228,6 +257,197 @@ poetry run celery -A config worker -l info -P solo
 Фронтенд живёт на другом домене, и без настройки браузер заблокировал бы запросы к API. Разрешённые домены задаются переменной `CORS_ALLOWED_ORIGINS` через запятую.
 
 `CorsMiddleware` стоит в списке выше `CommonMiddleware` — иначе заголовки не попадут в ответ.
+
+## CI/CD и деплой на сервер
+
+Каждый push проходит через конвейер GitHub Actions — `.github/workflows/ci.yml`:
+
+```
+  lint  ──►  test  ──►  build  ──►  deploy
+ flake8    88 тестов    Docker-     на сервер
+           на Postgres  образ       по SSH
+```
+
+Каждый этап стартует, только если предыдущий прошёл. Упал flake8 — тесты не запускаются. Упал хоть один тест — образ не собирается, и на сервер ничего не уезжает.
+
+### Когда что запускается
+
+| Событие | lint | test | build | deploy |
+|---|---|---|---|---|
+| push в рабочую ветку | ✅ | ✅ | только сборка | — |
+| pull request в `develop` | ✅ | ✅ | только сборка | — |
+| push в `develop` или `main` | ✅ | ✅ | сборка + публикация | ✅ |
+| ручной запуск | ✅ | ✅ | сборка + публикация | ✅ |
+
+На сервер попадает только `develop` и `main`. Push в рабочую ветку проходит линт, тесты и пробную сборку — ошибка видна сразу, — но сервер не трогает. Код доходит до сервера через pull request.
+
+Ручной запуск: **Actions** → **CI/CD** → **Run workflow**.
+
+### Что проверяет каждый этап
+
+**lint** — `flake8 .` с правилами из `setup.cfg`: длина строки 119, миграции исключены.
+
+**test** — поднимает настоящие PostgreSQL и Redis рядом с раннером и прогоняет:
+
+- `manage.py check` — конфигурация Django корректна;
+- `makemigrations --check` — никто не забыл создать миграцию после правки модели;
+- все тесты под `coverage`;
+- `coverage report --fail-under=80` — покрытие ниже 80% тоже останавливает конвейер.
+
+Тесты идут на PostgreSQL, а не на SQLite: у этих баз разное поведение, и SQLite скрыл бы часть ошибок.
+
+**build** — собирает Docker-образ. Перед деплоем публикует его в GitHub Container Registry с двумя тегами: хэш коммита и `latest`.
+
+**deploy** — по SSH копирует на сервер `docker-compose.prod.yaml` и конфиг Nginx, собирает `.env` из секретов репозитория, скачивает новый образ и перезапускает контейнеры. В конце проверяет, что приложение действительно отвечает по HTTP; если нет — деплой помечается проваленным, а в лог выводятся последние строки контейнера `web`.
+
+### Как устроен сервер
+
+```
+Интернет ──► :80 Nginx ──► web:8000 Gunicorn (Django)
+                 │                  │
+                 └ /static/, /media/ │
+                                     ├──► db:5432     PostgreSQL
+                                     └──► redis:6379  Redis ◄── celery, celery-beat
+```
+
+Боевая конфигурация — `docker-compose.prod.yaml`. Отличия от локальной:
+
+- вместо `runserver` работает Gunicorn, перед ним стоит Nginx;
+- образ не собирается на сервере, а скачивается готовым из реестра;
+- наружу открыт только порт 80, и только у Nginx.
+
+Статику Nginx отдаёт сам, с диска, не нагружая Python: `collectstatic` складывает её в том, который Nginx читает только на чтение.
+
+Все сервисы запущены с `restart: always`, а Docker включён в автозагрузку системы. Упал процесс — Docker поднимет контейнер заново; перезагрузился сервер — всё стартует само.
+
+### Подготовка сервера
+
+Нужен VPS с Ubuntu 22.04 или 24.04 и публичным IP. Подойдёт самый маленький тариф: 1–2 ядра, 2 ГБ памяти. Процессор нужен **x86**: образ собирается под эту архитектуру и на ARM не запустится. Если провайдер выдаёт динамический IP (Yandex Cloud), сделайте его статическим — иначе после перезагрузки адрес сменится и деплой перестанет находить сервер.
+
+**1. Ключи.** Понадобится два SSH-ключа. На своём компьютере:
+
+```bash
+# Личный — чтобы заходить на сервер самому (если ещё нет)
+ssh-keygen -t ed25519
+
+# Отдельный для GitHub Actions. На вопрос о пароле — дважды Enter:
+# CI не умеет вводить пароль от ключа
+ssh-keygen -t ed25519 -f ~/.ssh/habit_deploy -C github-actions
+```
+
+Два ключа, а не один, — чтобы при утечке секретов GitHub можно было отозвать доступ деплоя, не теряя собственного.
+
+**2. Сервер.** При создании VPS добавьте публичный личный ключ (`~/.ssh/id_ed25519.pub`). Затем зайдите на сервер, скачайте скрипт настройки и запустите, передав ему публичный ключ деплоя:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/Alexander-Sky/habit_tracker/main/deploy/server-setup.sh
+
+# Hetzner и другие, где входите сразу под root:
+bash server-setup.sh "ssh-ed25519 AAAA... github-actions"
+
+# Yandex Cloud, AWS и другие, где входите под своим пользователем:
+sudo bash server-setup.sh "ssh-ed25519 AAAA... github-actions"
+```
+
+В кавычках — целиком содержимое `~/.ssh/habit_deploy.pub`, одной строкой.
+
+Скрипт `deploy/server-setup.sh`:
+
+- ставит Docker из официального репозитория и включает его автозапуск;
+- создаёт пользователя `deploy` в группе `docker` — под ним работает деплой;
+- отключает вход по паролю, оставляя только ключи;
+- включает firewall `ufw`: снаружи открыты только 22 (SSH) и 80 (HTTP).
+
+Ваш личный ключ скрипт копирует пользователю `deploy`, чтобы вы тоже могли под ним входить. Если ключа не найдёт — откажется работать: иначе после отключения паролей на сервер было бы не зайти. Повторный запуск безопасен.
+
+После него проверьте в **новом** окне, не закрывая старое: `ssh deploy@<IP>`.
+
+**3. Секреты.** В репозитории: **Settings** → **Secrets and variables** → **Actions** → **New repository secret**.
+
+| Секрет | Обязателен | Что туда положить |
+|---|---|---|
+| `SSH_HOST` | да | IP сервера |
+| `SSH_USER` | да | `deploy` |
+| `SSH_PRIVATE_KEY` | да | содержимое `~/.ssh/habit_deploy` — **приватного**, без `.pub` |
+| `SECRET_KEY` | да | `python -c "import secrets; print(secrets.token_urlsafe(50))"` |
+| `DB_PASSWORD` | да | длинный случайный пароль, той же командой |
+| `TELEGRAM_BOT_TOKEN` | нет | токен от @BotFather; без него не уходят напоминания |
+
+Реестру образов отдельный пароль не нужен: GitHub Actions использует встроенный `GITHUB_TOKEN`, который выдаётся на один запуск и сам истекает.
+
+**4. Первый деплой.** Слейте pull request в `develop` или запустите workflow вручную. Через пару минут приложение откроется на `http://<IP>/api/docs/`.
+
+Суперпользователь создаётся один раз вручную:
+
+```bash
+ssh deploy@<IP>
+cd ~/habit_tracker
+docker compose -f docker-compose.prod.yaml exec web python manage.py createsuperuser
+```
+
+### Где что хранится
+
+На сервере в `~/habit_tracker` лежат три файла, и все их кладёт туда деплой:
+
+| Файл | Откуда |
+|---|---|
+| `docker-compose.prod.yaml` | копируется из репозитория |
+| `nginx/default.conf` | копируется из репозитория |
+| `.env` | собирается из секретов GitHub, права `600` |
+
+Руками на сервере ничего не правится. Поменять настройку — значит поменять файл в репозитории или секрет в GitHub и запустить деплой. Так конфигурация сервера всегда совпадает с тем, что видно в git.
+
+### Работа с сервером
+
+```bash
+cd ~/habit_tracker
+docker compose -f docker-compose.prod.yaml ps               # состояние сервисов
+docker compose -f docker-compose.prod.yaml logs -f web      # логи Gunicorn
+docker compose -f docker-compose.prod.yaml logs -f celery   # логи воркера
+grep WEB_IMAGE .env                                         # какая версия запущена
+```
+
+### Откат
+
+Каждый образ помечен хэшем коммита, поэтому вернуться на прошлую версию — значит перезапустить workflow на нужном коммите: **Actions** → выбрать успешный запуск → **Re-run all jobs**.
+
+### Безопасность
+
+- Вход на сервер только по ключам, пароли отключены.
+- Firewall пропускает только 22 и 80.
+- PostgreSQL и Redis не опубликованы наружу. Это важно не только из-за firewall: порты, опубликованные через `ports:`, Docker пробрасывает **в обход** `ufw`, и firewall их не закрыл бы.
+- `DEBUG=False`, `ALLOWED_HOSTS` — только адрес сервера: запросы с чужим заголовком `Host` отклоняются.
+- Секреты живут в GitHub Secrets и попадают в `.env` на сервере при деплое. В репозитории их нет, в логах GitHub они маскируются.
+
+---
+
+## Установка без Docker
+
+Понадобятся Python 3.12+, Poetry и запущенный Redis. PostgreSQL можно не ставить: по умолчанию Django возьмёт SQLite.
+
+```bash
+poetry install --no-root
+cp .env.template .env
+```
+
+В `.env` поменяйте три строки — шаблон рассчитан на Docker, а здесь база и Redis свои:
+
+```
+# DB_ENGINE=...        закомментировать целиком, тогда будет SQLite
+DB_HOST=localhost
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+```
+
+Дальше как обычно:
+
+```bash
+poetry run python manage.py migrate
+poetry run python manage.py createsuperuser
+poetry run python manage.py runserver
+```
+
+Сервер поднимется на http://127.0.0.1:8000/
 
 ## Тесты
 
