@@ -241,29 +241,51 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           umask 077
-          cat > .env.production <<EOF
-          SECRET_KEY='${SECRET_KEY}'
-          DEBUG=False
-          ALLOWED_HOSTS=${SSH_HOST}
-          CSRF_TRUSTED_ORIGINS=http://${SSH_HOST}
-          CORS_ALLOWED_ORIGINS=http://${SSH_HOST}
-          TIME_ZONE=Europe/Vienna
-          DB_ENGINE=django.db.backends.postgresql
-          DB_NAME=habit_tracker
-          DB_USER=habit_tracker
-          DB_PASSWORD='${DB_PASSWORD}'
-          DB_HOST=db
-          DB_PORT=5432
-          CELERY_BROKER_URL=redis://redis:6379/0
-          CELERY_RESULT_BACKEND=redis://redis:6379/0
-          ACCESS_TOKEN_MINUTES=60
-          REFRESH_TOKEN_DAYS=1
-          TELEGRAM_BOT_TOKEN='${TELEGRAM_BOT_TOKEN}'
-          TELEGRAM_API_URL=https://api.telegram.org/bot
-          TELEGRAM_TIMEOUT_SECONDS=30
-          REMINDER_WINDOW_MINUTES=5
-          WEB_IMAGE=${IMAGE}
-          EOF
+
+          # Значение секрета почти всегда копируют вручную, и вместе с ним
+          # легко захватить завершающий перенос строки. В .env такой перенос
+          # разрывает файл пополам, а дальше начинается самое неприятное:
+          # Compose читает этот файл ДВУМЯ разными разборщиками — подстановкой
+          # ${VAR} для настроек базы и env_file для приложения. На испорченном
+          # файле они расходятся, база поднимается с одним паролем, Django
+          # приходит с другим, и всё это вылезает через десять минут как
+          # "password authentication failed". Чистим значения на входе
+          clean() { printf '%s' "$1" | tr -d '\r\n'; }
+
+          {
+            echo "SECRET_KEY=$(clean "$SECRET_KEY")"
+            echo "DEBUG=False"
+            echo "ALLOWED_HOSTS=${SSH_HOST}"
+            echo "CSRF_TRUSTED_ORIGINS=http://${SSH_HOST}"
+            echo "CORS_ALLOWED_ORIGINS=http://${SSH_HOST}"
+            echo "TIME_ZONE=Europe/Vienna"
+            echo "DB_ENGINE=django.db.backends.postgresql"
+            echo "DB_NAME=habit_tracker"
+            echo "DB_USER=habit_tracker"
+            echo "DB_PASSWORD=$(clean "$DB_PASSWORD")"
+            echo "DB_HOST=db"
+            echo "DB_PORT=5432"
+            echo "CELERY_BROKER_URL=redis://redis:6379/0"
+            echo "CELERY_RESULT_BACKEND=redis://redis:6379/0"
+            echo "ACCESS_TOKEN_MINUTES=60"
+            echo "REFRESH_TOKEN_DAYS=1"
+            echo "TELEGRAM_BOT_TOKEN=$(clean "$TELEGRAM_BOT_TOKEN")"
+            echo "TELEGRAM_API_URL=https://api.telegram.org/bot"
+            echo "TELEGRAM_TIMEOUT_SECONDS=30"
+            echo "REMINDER_WINDOW_MINUTES=5"
+            echo "WEB_IMAGE=${IMAGE}"
+          } > .env.production
+
+          # Проверяем результат, а не надеемся на него: в исправном файле
+          # строк ровно столько же, сколько строк вида ИМЯ=значение. Любой
+          # лишний "хвост" ловится здесь, а не всплывает потом на сервере
+          lines=$(grep -c '' .env.production)
+          vars=$(grep -c '^[A-Za-z_][A-Za-z_0-9]*=' .env.production)
+          echo "Собран .env: строк ${lines}, переменных ${vars}"
+          if [ "$lines" -ne "$vars" ]; then
+            echo "::error::.env собран неправильно: ${lines} строк при ${vars} переменных. Похоже, в каком-то секрете остался перенос строки."
+            exit 1
+          fi
 
       # DEPLOY_DIR подставляется на раннере (SC2029 — намеренно),
       # а ~ раскрывает уже сервер — в домашний каталог пользователя деплоя
